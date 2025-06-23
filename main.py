@@ -1,4 +1,3 @@
-
 import logging
 import os
 from flask import Flask
@@ -28,7 +27,6 @@ def run():
 Thread(target=run).start()
 
 TOKEN = os.getenv("BOT_TOKEN", "8091244631:AAHZRqn2bY3Ow2zH2WNk0J92mar6D0MgfLw")
-chat_id = 992940966
 
 logging.basicConfig(level=logging.INFO)
 user_settings = {}
@@ -45,30 +43,61 @@ timeframes = {
 }
 
 def analyze_signal(data):
-    if len(data) < 20:
+    if len(data) < 30:
         return "Недостатньо даних для аналізу", None
 
     close = data['Close']
+    high = data['High']
+    low = data['Low']
+
     rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
     ema = ta.trend.EMAIndicator(close, window=9).ema_indicator()
     bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
-    upper_bb = bb.bollinger_hband()
-    lower_bb = bb.bollinger_lband()
+    macd = ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
+    stoch = ta.momentum.StochasticOscillator(high, low, close, window=14, smooth_window=3)
 
     current_price = close.iloc[-1]
     current_rsi = rsi.iloc[-1]
     current_ema = ema.iloc[-1]
-    current_upper = upper_bb.iloc[-1]
-    current_lower = lower_bb.iloc[-1]
+    current_upper = bb.bollinger_hband().iloc[-1]
+    current_lower = bb.bollinger_lband().iloc[-1]
+    macd_line = macd.macd().iloc[-1]
+    macd_signal = macd.macd_signal().iloc[-1]
+    stoch_k = stoch.stoch().iloc[-1]
+    stoch_d = stoch.stoch_signal().iloc[-1]
 
     signal = "Очікуйте"
 
-    if current_rsi < 30 and current_price < current_lower and current_price > current_ema:
+    buy_conditions = (
+        current_rsi < 30 and
+        current_price > current_ema and
+        macd_line > macd_signal and
+        stoch_k < 20 and stoch_k > stoch_d and
+        current_price <= current_lower
+    )
+    sell_conditions = (
+        current_rsi > 70 and
+        current_price < current_ema and
+        macd_line < macd_signal and
+        stoch_k > 80 and stoch_k < stoch_d and
+        current_price >= current_upper
+    )
+
+    if buy_conditions:
         signal = "💚 Купити"
-    elif current_rsi > 70 and current_price > current_upper and current_price < current_ema:
+    elif sell_conditions:
         signal = "❤️ Продати"
 
-    return signal, (current_rsi, current_ema, current_price, current_upper, current_lower)
+    explanation = (
+        f"RSI: {current_rsi:.2f} (перепроданість <30 / перекупленість >70)\n"
+        f"EMA(9): {current_ema:.5f} (тренд)\n"
+        f"MACD: {macd_line:.5f} / {macd_signal:.5f} (перетин ліній)\n"
+        f"Stochastic: %K={stoch_k:.2f}, %D={stoch_d:.2f} (перекупленість/перепроданість)\n"
+        f"Bollinger Bands: верхня={current_upper:.5f}, нижня={current_lower:.5f}\n"
+        f"Ціна: {current_price:.5f}"
+    )
+
+    return signal, explanation
 
 def generate_plot(data, pair, tf):
     plt.figure(figsize=(10, 4))
@@ -115,20 +144,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         ticker = yf.Ticker(pair + "=X")
         interval = timeframes[tf]
-        now = datetime.datetime.utcnow()
-        past = now - datetime.timedelta(minutes=50)
-        df = ticker.history(start=past, end=now, interval=interval)
 
-        signal, data_points = analyze_signal(df)
+        try:
+            df = ticker.history(period="2d", interval=interval)
+        except Exception as e:
+            logging.error(f"Помилка завантаження даних: {e}")
+            await query.edit_message_text(f"❌ Помилка при отриманні даних для {pair} ({tf}). Спробуйте пізніше.")
+            return
+
+        if df.empty or len(df) < 30:
+            await query.edit_message_text(
+                f"📉 Недостатньо даних для аналізу за пару {pair} з таймфреймом {tf}.\n"
+                "Спробуйте інший таймфрейм або пару."
+            )
+            return
+
+        signal, explanation = analyze_signal(df)
         filename = generate_plot(df, pair, tf)
 
-        text = f"📈 Пара: {pair}\n⏱️ Таймфрейм: {tf}\n📉 Сигнал: {signal}"
-        if data_points:
-            rsi, ema, price, upper, lower = data_points
-            text += f"\nRSI: {rsi:.2f}\nEMA: {ema:.5f}\nЦіна: {price:.5f}\nBB Верхня: {upper:.5f}\nBB Нижня: {lower:.5f}"
+        text = f"📈 Пара: {pair}\n⏱️ Таймфрейм: {tf}\n📉 Сигнал: {signal}\n\n📋 Пояснення:\n{explanation}"
 
         history.append({
-            "timestamp": now.strftime("%Y-%m-%d %H:%M"),
+            "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
             "pair": pair,
             "tf": tf,
             "signal": signal
