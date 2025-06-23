@@ -1,22 +1,20 @@
 import logging
 import os
+import asyncio
 import datetime
 import pytz
-from flask import Flask
 from threading import Thread
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes
-)
-import yfinance as yf
-import ta
-import matplotlib.pyplot as plt
-import mplfinance as mpf
-import pandas as pd
 
+from flask import Flask
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+
+import yfinance as yf
+import pandas as pd
+import ta
+import mplfinance as mpf
+
+# --- Flask для пінгу ---
 app_web = Flask('')
 
 @app_web.route('/')
@@ -28,9 +26,10 @@ def run():
 
 Thread(target=run).start()
 
+# --- Налаштування ---
 TOKEN = os.getenv("BOT_TOKEN", "8091244631:AAHZRqn2bY3Ow2zH2WNk0J92mar6D0MgfLw")
-logging.basicConfig(level=logging.INFO)
 
+logging.basicConfig(level=logging.INFO)
 user_settings = {}
 history = []
 
@@ -44,120 +43,205 @@ timeframes = {
     "5m": "5m"
 }
 
-def analyze_signal(df):
-    if len(df) < 30:
-        return None, "Недостатньо даних для аналізу."
+kyiv_tz = pytz.timezone("Europe/Kiev")
 
-    df['EMA'] = ta.trend.EMAIndicator(df['Close'], window=9).ema_indicator()
-    df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
-    macd = ta.trend.MACD(df['Close'])
-    df['MACD'] = macd.macd()
-    df['MACD_SIGNAL'] = macd.macd_signal()
-    stoch = ta.momentum.StochasticOscillator(df['High'], df['Low'], df['Close'])
-    df['%K'] = stoch.stoch()
-    df['%D'] = stoch.stoch_signal()
-    bb = ta.volatility.BollingerBands(df['Close'], window=20)
-    df['BB_UPPER'] = bb.bollinger_hband()
-    df['BB_LOWER'] = bb.bollinger_lband()
+# --- Асинхронне завантаження даних ---
+async def fetch_data_async(ticker, interval):
+    # Використовуємо period="1d" - щоб було достатньо свічок
+    return await asyncio.to_thread(ticker.history, period="1d", interval=interval)
 
-    latest = df.iloc[-1]
-    decision = "❓ Невизначено"
+# --- Аналіз сигналу ---
+def analyze_signal(data):
+    if data.empty or len(data) < 20:
+        return None
 
-    if latest['RSI'] < 30 and latest['Close'] < latest['BB_LOWER'] and latest['MACD'] > latest['MACD_SIGNAL']:
-        decision = "💚 Купити"
-    elif latest['RSI'] > 70 and latest['Close'] > latest['BB_UPPER'] and latest['MACD'] < latest['MACD_SIGNAL']:
-        decision = "❤️ Продати"
-    else:
-        return None, "📉 Немає чіткого сигналу (фільтровано)."
+    close = data['Close']
+    rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
+    ema = ta.trend.EMAIndicator(close, window=9).ema_indicator()
+    macd = ta.trend.MACD(close)
+    stoch = ta.momentum.StochasticOscillator(data['High'], data['Low'], close, window=14, smooth_window=3)
+    bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
 
-    tz = pytz.timezone("Europe/Kyiv")
-    now = datetime.datetime.now(tz)
-    target_time = now + datetime.timedelta(minutes=5)
-    exit_time = target_time.strftime("%H:%M")
+    current_price = close.iloc[-1]
+    current_rsi = rsi.iloc[-1]
+    current_ema = ema.iloc[-1]
+    current_macd = macd.macd().iloc[-1]
+    current_macd_signal = macd.macd_signal().iloc[-1]
+    current_stoch_k = stoch.stoch().iloc[-1]
+    current_stoch_d = stoch.stoch_signal().iloc[-1]
+    current_upper = bb.bollinger_hband().iloc[-1]
+    current_lower = bb.bollinger_lband().iloc[-1]
 
-    explanation = (
-        f"{decision}\n\n"
-        f"📋 Пояснення:\n"
-        f"RSI: {latest['RSI']:.2f} (перепроданість <30 / перекупленість >70)\n"
-        f"EMA(9): {latest['EMA']:.5f} (тренд)\n"
-        f"MACD: {latest['MACD']:.5f} / {latest['MACD_SIGNAL']:.5f} (перетин ліній)\n"
-        f"Stochastic: %K={latest['%K']:.2f}, %D={latest['%D']:.2f}\n"
-        f"Bollinger Bands: верхня={latest['BB_UPPER']:.5f}, нижня={latest['BB_LOWER']:.5f}\n"
-        f"Ціна: {latest['Close']:.5f}\n"
-        f"\n📅 Угода до: {exit_time} (за Києвом)"
-    )
+    # Простий сигнал: купити або продати
+    signal = None
+    if current_rsi < 30 and current_price < current_lower and current_price > current_ema:
+        signal = "Купити"
+    elif current_rsi > 70 and current_price > current_upper and current_price < current_ema:
+        signal = "Продати"
 
-    return decision, explanation
+    return {
+        "signal": signal,
+        "rsi": current_rsi,
+        "ema": current_ema,
+        "macd": current_macd,
+        "macd_signal": current_macd_signal,
+        "stoch_k": current_stoch_k,
+        "stoch_d": current_stoch_d,
+        "bb_upper": current_upper,
+        "bb_lower": current_lower,
+        "price": current_price
+    }
 
-def generate_candle_plot(df, pair, tf):
-    df = df[-50:]
-    df.index.name = 'Date'
-    df.index = pd.to_datetime(df.index)
+# --- Генерація свічкового графіка ---
+def generate_candlestick_chart(data, pair, tf):
+    data = data.copy()
+    data.index.name = "Date"
+    data = data[['Open', 'High', 'Low', 'Close', 'Volume']]
+    filename = f"{pair}_{tf}_candlestick.png"
+
     mpf.plot(
-        df,
+        data,
         type='candle',
-        style='yahoo',
+        style='charles',
         title=f"{pair} ({tf})",
-        ylabel='Ціна',
-        volume=False,
-        savefig=f"{pair}_{tf}.png"
+        ylabel='Price',
+        savefig=filename,
+        volume=True,
+        tight_layout=True
     )
-    return f"{pair}_{tf}.png"
+    return filename
 
+# --- Розрахунок часу до входу в угоду (5 хв) ---
+def get_entry_deadline():
+    now = datetime.datetime.now(kyiv_tz)
+    deadline = now + datetime.timedelta(minutes=5)
+    return deadline.strftime("%H:%M")
+
+# --- Обробка команди /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🎯 Вибрати валютну пару", callback_data="choose_pair")],
-        [InlineKeyboardButton("🎲 Отримати випадковий сигнал", callback_data="random_signal")]
+        [InlineKeyboardButton("Випадкова пара", callback_data="random_pair")],
+        [InlineKeyboardButton("Обрати пару", callback_data="choose_pair")],
+        [InlineKeyboardButton("Історія", callback_data="history")]
     ]
-    await update.message.reply_text("Що бажаєте зробити?", reply_markup=InlineKeyboardMarkup(keyboard))
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Виберіть опцію:", reply_markup=reply_markup)
 
+# --- Обробка callback ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer()
 
-    if query.data == "choose_pair":
-        keyboard = [[InlineKeyboardButton(pair, callback_data=f"pair_{pair}")]
-                    for pair in available_pairs]
-        await query.edit_message_text("Оберіть валютну пару:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif query.data.startswith("pair_"):
-        pair = query.data.split("_")[1]
-        user_settings[user_id] = {"pair": pair}
-        keyboard = [[InlineKeyboardButton(tf, callback_data=f"tf_{tf}")]
-                    for tf in timeframes]
-        await query.edit_message_text(f"Обрано пару: {pair}. Оберіть таймфрейм:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif query.data.startswith("tf_"):
-        tf = query.data.split("_")[1]
-        pair = user_settings[user_id]["pair"]
-        await send_signal(update, context, pair, tf, user_id)
-
-    elif query.data == "random_signal":
+    # Випадкова пара
+    if query.data == "random_pair":
         import random
         pair = random.choice(available_pairs)
-        tf = random.choice(list(timeframes.keys()))
-        await send_signal(update, context, pair, tf, user_id)
-
-async def send_signal(update, context, pair, tf, user_id):
-    await context.bot.send_message(chat_id=user_id, text=f"📊 Отримую сигнал для {pair} ({tf})...")
-    ticker = yf.Ticker(pair + "=X")
-    interval = timeframes[tf]
-    df = ticker.history(period="1d", interval=interval)
-
-    signal, explanation = analyze_signal(df)
-
-    if not signal:
-        await context.bot.send_message(chat_id=user_id, text=f"📉 {explanation}")
+        user_settings[user_id] = {"pair": pair}
+        keyboard = [[InlineKeyboardButton(tf, callback_data=f"tf_{tf}")] for tf in timeframes]
+        await query.edit_message_text(f"Випадкова пара: {pair}\nОберіть таймфрейм:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    filename = generate_candle_plot(df, pair, tf)
-    await context.bot.send_photo(chat_id=user_id, photo=open(filename, "rb"), caption=f"📈 Пара: {pair}\n⏱️ Таймфрейм: {tf}\n{explanation}")
-    os.remove(filename)
+    # Вибрати пару
+    if query.data == "choose_pair":
+        keyboard = [[InlineKeyboardButton(pair, callback_data=f"pair_{pair}")] for pair in available_pairs]
+        await query.edit_message_text("Оберіть валютну пару:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
 
+    # Історія
+    if query.data == "history":
+        if not history:
+            await query.edit_message_text("Історія порожня.")
+            return
+        msg = "📜 Історія останніх сигналів:\n\n"
+        for h in history[-10:]:
+            msg += f"{h['timestamp']} | {h['pair']} ({h['tf']}) — {h['signal']}\n"
+        await query.edit_message_text(msg)
+        return
+
+    # Обрати пару
+    if query.data.startswith("pair_"):
+        pair = query.data.split("_")[1]
+        user_settings[user_id] = {"pair": pair}
+        keyboard = [[InlineKeyboardButton(tf, callback_data=f"tf_{tf}")] for tf in timeframes]
+        await query.edit_message_text(f"Оберіть таймфрейм для {pair}:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Обрати таймфрейм
+    if query.data.startswith("tf_"):
+        tf = query.data.split("_")[1]
+        pair = user_settings.get(user_id, {}).get("pair")
+        if not pair:
+            await query.edit_message_text("Помилка: спочатку оберіть валютну пару.")
+            return
+
+        user_settings[user_id]["timeframe"] = tf
+        await query.edit_message_text(f"🤖 Обробляю сигнал для {pair} ({tf})...")
+
+        ticker = yf.Ticker(pair + "=X")
+        interval = timeframes[tf]
+
+        try:
+            df = await fetch_data_async(ticker, interval)
+
+            if df.empty:
+                await context.bot.send_message(chat_id=user_id, text=f"📉 Недостатньо даних для аналізу за пару {pair} з таймфреймом {tf}. Спробуйте інший таймфрейм або пару.")
+                return
+
+            signal_data = analyze_signal(df)
+            if not signal_data or not signal_data["signal"]:
+                await context.bot.send_message(chat_id=user_id, text=f"📉 Сигнал відсутній для {pair} ({tf}). Спробуйте інший таймфрейм або пару.")
+                return
+
+            filename = generate_candlestick_chart(df, pair, tf)
+
+            deadline = get_entry_deadline()
+
+            text = (
+                f"📈 Пара: {pair}\n"
+                f"⏱️ Таймфрейм: {tf}\n"
+                f"📉 Сигнал: {signal_data['signal']}\n"
+                f"⏳ Заходити в угоду до: {deadline}\n\n"
+                f"📋 Пояснення:\n"
+                f"RSI: {signal_data['rsi']:.2f} (перепроданість <30 / перекупленість >70)\n"
+                f"EMA(9): {signal_data['ema']:.5f} (тренд)\n"
+                f"MACD: {signal_data['macd']:.5f} / {signal_data['macd_signal']:.5f} (перетин ліній)\n"
+                f"Stochastic: %K={signal_data['stoch_k']:.2f}, %D={signal_data['stoch_d']:.2f} (перекупленість/перепроданість)\n"
+                f"Bollinger Bands: верхня={signal_data['bb_upper']:.5f}, нижня={signal_data['bb_lower']:.5f}\n"
+                f"Ціна: {signal_data['price']:.5f}"
+            )
+
+            await context.bot.send_photo(chat_id=user_id, photo=open(filename, "rb"), caption=text)
+            os.remove(filename)
+
+            # Запис в історію
+            now = datetime.datetime.now(kyiv_tz)
+            history.append({
+                "timestamp": now.strftime("%Y-%m-%d %H:%M"),
+                "pair": pair,
+                "tf": tf,
+                "signal": signal_data['signal']
+            })
+
+        except Exception as e:
+            logging.error(f"Помилка при обробці сигналу: {e}")
+            await context.bot.send_message(chat_id=user_id, text="Виникла помилка при отриманні сигналу. Спробуйте пізніше.")
+
+# --- Обробка /history ---
+async def history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not history:
+        await update.message.reply_text("Історія сигналів поки що порожня.")
+    else:
+        msg = "📜 Історія сигналів:\n\n"
+        for h in history[-10:]:
+            msg += f"{h['timestamp']} | {h['pair']} ({h['tf']}) — {h['signal']}\n"
+        await update.message.reply_text(msg)
+
+# --- Запуск ---
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("history", history_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
     logging.info("Бот запущено")
     app.run_polling()
