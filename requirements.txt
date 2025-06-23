@@ -3,6 +3,6 @@ yfinance
 pandas
 ta
 matplotlib
-flask
 mplfinance
-numpy
+flask
+pytz
