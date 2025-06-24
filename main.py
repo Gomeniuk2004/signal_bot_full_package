@@ -1,75 +1,106 @@
-import asyncio
-import logging
+import time
 import pytz
-from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-import mplfinance as mpf
-import pandas as pd
+import logging
 import yfinance as yf
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
+import pandas as pd
+import numpy as np
+from datetime import datetime
 from telegram import Bot
-from io import BytesIO
+from ta.trend import EMAIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.volatility import BollingerBands
+from ta.trend import MACD
 
-# --- Конфіг ---
+# Вшиті значення токена і чат ID
 TOKEN = "8091244631:AAHZRqn2bY3Ow2zH2WNk0J92mar6D0MgfLw"
-CHAT_ID = 992940966
-PAIRS = ["EURAUD=X","CHFJPY=X","EURUSD=X","CADJPY=X","GBPJPY=X","EURCAD=X","AUDUSD=X","EURCHF=X","EURGBP=X","EURJPY=X",
-         "USDCAD=X","AUDCAD=X","AUDJPY=X","USDJPY=X","AUDCHF=X","GBPUSD=X","GBPCHF=X","GBPCAD=X","CADCHF=X","GBPAUD=X","USDCHF=X"]
+CHAT_ID = "992940966"
+bot = Bot(token=TOKEN)
 
-TIMEZONE = pytz.timezone("Europe/Kyiv")
+logging.basicConfig(level=logging.INFO)
 
-# --- Сигнальна логіка ---
-def get_signal(df):
-    rsi = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
-    ema_fast = EMAIndicator(close=df['Close'], window=5).ema_indicator().iloc[-1]
-    ema_slow = EMAIndicator(close=df['Close'], window=20).ema_indicator().iloc[-1]
+PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD", "USDT-USD"]
+INTERVAL = "5m"
 
-    if rsi < 30 and ema_fast > ema_slow:
-        return "Купити"
-    elif rsi > 70 and ema_fast < ema_slow:
-        return "Продати"
-    return None
+def fetch_data(symbol):
+    try:
+        data = yf.download(tickers=symbol, period="1d", interval=INTERVAL)
+        if data.empty:
+            return None
+        return data
+    except Exception as e:
+        logging.warning(f"Error fetching {symbol}: {e}")
+        return None
 
-# --- Завантаження графіку ---
-def generate_chart(df, signal_time, signal_action):
-    df = df.tail(50)
-    mc = mpf.make_marketcolors(up='g', down='r', inherit=True)
-    s = mpf.make_mpf_style(marketcolors=mc)
+def analyze(data):
+    close = data["Close"]
+    ema = EMAIndicator(close, window=14).ema_indicator()
+    rsi = RSIIndicator(close, window=14).rsi()
+    macd = MACD(close).macd_diff()
+    stoch = StochasticOscillator(data["High"], data["Low"], close).stoch()
+    bb = BollingerBands(close)
+    bb_upper = bb.bollinger_hband()
+    bb_lower = bb.bollinger_lband()
 
-    signal_index = df.index.get_loc(signal_time) if signal_time in df.index else -1
-    alines = [[(df.index[signal_index], df['Close'].iloc[signal_index]),
-               (df.index[signal_index], df['Close'].iloc[signal_index] + 0.002)]]
+    latest = {
+        "price": close.iloc[-1],
+        "ema": ema.iloc[-1],
+        "rsi": rsi.iloc[-1],
+        "macd": macd.iloc[-1],
+        "stoch": stoch.iloc[-1],
+        "bb_upper": bb_upper.iloc[-1],
+        "bb_lower": bb_lower.iloc[-1],
+    }
 
-    fig, axlist = mpf.plot(df, type='candle', style=s, returnfig=True, alines=dict(alines=alines, colors=['b']))
+    signal = None
+    if (
+        latest["price"] > latest["ema"]
+        and latest["rsi"] < 70
+        and latest["macd"] > 0
+        and latest["stoch"] > 50
+        and latest["price"] < latest["bb_upper"]
+    ):
+        signal = "Купити"
+    elif (
+        latest["price"] < latest["ema"]
+        and latest["rsi"] > 30
+        and latest["macd"] < 0
+        and latest["stoch"] < 50
+        and latest["price"] > latest["bb_lower"]
+    ):
+        signal = "Продати"
 
-    buf = BytesIO()
-    fig.savefig(buf, format='png')
-    buf.seek(0)
-    return buf
+    return signal, latest
 
-# --- Основна логіка ---
-async def send_signal(bot: Bot):
+def format_time():
+    kyiv = pytz.timezone("Europe/Kyiv")
+    now = datetime.now(kyiv)
+    entry_minute = (now.minute // 5 + 1) * 5
+    entry_time = now.replace(minute=entry_minute % 60, second=0)
+    return entry_time.strftime('%H:%M')
+
+def send_signal(symbol, signal, latest):
+    name = symbol.replace("=X", "").replace("-", "")
+    message = f"""📡 <b>Сигнал для {name}</b>
+Дія: <b>{signal}</b>
+Ціна: {latest['price']:.5f}
+EMA: {latest['ema']:.5f}
+RSI: {latest['rsi']:.2f}
+MACD: {latest['macd']:.5f}
+Stoch: {latest['stoch']:.2f}
+Час входу (Київ): <b>{format_time()}</b>
+#Signal24
+"""
+    bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML")
+
+def main():
     while True:
-        for pair in PAIRS:
-            try:
-                df = yf.download(pair, interval="5m", period="1d", progress=False)
-                if df.empty: continue
-                signal = get_signal(df)
+        for symbol in PAIRS:
+            data = fetch_data(symbol)
+            if data is not None:
+                signal, latest = analyze(data)
                 if signal:
-                    now = datetime.now(TIMEZONE)
-                    exit_time = (now + timedelta(minutes=5)).strftime("%H:%M")
-                    chart = generate_chart(df, df.index[-1], signal)
-                    text = f"📈 <b>Пара:</b> {pair.replace('=X','')}
-💡 <b>Сигнал:</b> <u>{signal}</u>
-⏱ <b>До:</b> {exit_time}"
-                    await bot.send_photo(chat_id=CHAT_ID, photo=chart, caption=text, parse_mode="HTML")
-            except Exception as e:
-                print(f"❌ Error: {e}")
-        await asyncio.sleep(10)
+                    send_signal(symbol, signal, latest)
+        time.sleep(60)
 
-# --- Старт ---
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    bot = Bot(token=TOKEN)
-    asyncio.run(send_signal(bot))
+    main()
