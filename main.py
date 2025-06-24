@@ -9,24 +9,32 @@ from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
 
-# Вшиті значення токена і чат ID
+# Токен і чат ID
 TOKEN = "8091244631:AAHZRqn2bY3Ow2zH2WNk0J92mar6D0MgfLw"
 CHAT_ID = "992940966"
 bot = Bot(token=TOKEN)
 
 logging.basicConfig(level=logging.INFO)
 
-PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD", "USDT-USD"]
+# Повний список валютних пар Pocket Option
+PAIRS = [
+    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "NZDUSD=X", "USDCAD=X", "USDCHF=X",
+    "EURGBP=X", "EURJPY=X", "GBPJPY=X", "AUDJPY=X", "CHFJPY=X", "NZDJPY=X", "CADJPY=X",
+    "EURCHF=X", "EURAUD=X", "GBPAUD=X", "AUDCAD=X", "AUDCHF=X", "NZDCAD=X", "NZDCHF=X",
+    "BTC-USD", "ETH-USD", "LTC-USD", "XRP-USD", "BNB-USD", "SOL-USD", "DOGE-USD", "USDT-USD"
+]
+
 INTERVAL = "5m"
 
 def fetch_data(symbol):
     try:
         data = yf.download(tickers=symbol, period="1d", interval=INTERVAL)
-        if data.empty:
+        if data.empty or len(data) < 20:
+            logging.warning(f"Пара {symbol} неактивна або не існує. Пропускаю.")
             return None
         return data
     except Exception as e:
-        logging.warning(f"Error fetching {symbol}: {e}")
+        logging.warning(f"Помилка при завантаженні {symbol}: {e}")
         return None
 
 def analyze(data):
