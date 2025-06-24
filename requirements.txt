@@ -4,3 +4,4 @@ ta
 pandas
 matplotlib
 pytz
+nest_asyncio
