@@ -1,125 +1,75 @@
-import logging
 import asyncio
-import datetime
+import logging
 import pytz
-import yfinance as yf
-import pandas as pd
-import ta
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import mplfinance as mpf
-from io import BytesIO
+import pandas as pd
+import yfinance as yf
+from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
 from telegram import Bot
-from telegram.error import TelegramError
+from io import BytesIO
 
-# Токен і чат айді
+# --- Конфіг ---
 TOKEN = "8091244631:AAHZRqn2bY3Ow2zH2WNk0J92mar6D0MgfLw"
 CHAT_ID = 992940966
+PAIRS = ["EURAUD=X","CHFJPY=X","EURUSD=X","CADJPY=X","GBPJPY=X","EURCAD=X","AUDUSD=X","EURCHF=X","EURGBP=X","EURJPY=X",
+         "USDCAD=X","AUDCAD=X","AUDJPY=X","USDJPY=X","AUDCHF=X","GBPUSD=X","GBPCHF=X","GBPCAD=X","CADCHF=X","GBPAUD=X","USDCHF=X"]
 
-# Налаштування логів
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+TIMEZONE = pytz.timezone("Europe/Kyiv")
 
-# Таймфрейм 5 хв
-TIMEFRAME = '5m'
+# --- Сигнальна логіка ---
+def get_signal(df):
+    rsi = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
+    ema_fast = EMAIndicator(close=df['Close'], window=5).ema_indicator().iloc[-1]
+    ema_slow = EMAIndicator(close=df['Close'], window=20).ema_indicator().iloc[-1]
 
-# Параметри пар, які аналізуємо (треба у форматі Yahoo Finance, тобто без "/")
-PAIRS = [
-    "EURAUD", "CHFJPY", "EURUSD", "CADJPY", "GBPJPY", "EURCAD", "AUDUSD", "EURCHF",
-    "EURGBP", "EURJPY", "USDCAD", "AUDCAD", "AUDJPY", "USDJPY", "AUDCHF", "GBPUSD",
-    "GBPCHF", "GBPCAD", "CADCHF", "GBPAUD", "USDCHF"
-]
+    if rsi < 30 and ema_fast > ema_slow:
+        return "Купити"
+    elif rsi > 70 and ema_fast < ema_slow:
+        return "Продати"
+    return None
 
-# Функція для перевірки чи пара активна (є дані на Yahoo Finance)
-def is_pair_active(ticker: str) -> bool:
-    try:
-        data = yf.Ticker(ticker + "=X").history(period="1d", interval=TIMEFRAME)
-        return not data.empty
-    except Exception as e:
-        logger.error(f"Помилка при перевірці пари {ticker}: {e}")
-        return False
+# --- Завантаження графіку ---
+def generate_chart(df, signal_time, signal_action):
+    df = df.tail(50)
+    mc = mpf.make_marketcolors(up='g', down='r', inherit=True)
+    s = mpf.make_mpf_style(marketcolors=mc)
 
-# Функція для отримання свіжих даних і сигналів
-def get_signal(ticker: str):
-    try:
-        df = yf.Ticker(ticker + "=X").history(period="1d", interval=TIMEFRAME)
-        if df.empty or len(df) < 20:
-            return None, None
+    signal_index = df.index.get_loc(signal_time) if signal_time in df.index else -1
+    alines = [[(df.index[signal_index], df['Close'].iloc[signal_index]),
+               (df.index[signal_index], df['Close'].iloc[signal_index] + 0.002)]]
 
-        # Обчислення індикаторів
-        df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
-        df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
-        macd = ta.trend.MACD(df['Close'])
-        df['MACD'] = macd.macd()
-        df['MACD_signal'] = macd.macd_signal()
+    fig, axlist = mpf.plot(df, type='candle', style=s, returnfig=True, alines=dict(alines=alines, colors=['b']))
 
-        # Аналіз останнього бару
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+    buf = BytesIO()
+    fig.savefig(buf, format='png')
+    buf.seek(0)
+    return buf
 
-        # Простий сигнал: купити, якщо MACD перетинає сигнал знизу вверх
-        if (prev['MACD'] < prev['MACD_signal']) and (last['MACD'] > last['MACD_signal']):
-            return "Купити", df
-        # Продати, якщо MACD перетинає сигнал зверху вниз
-        elif (prev['MACD'] > prev['MACD_signal']) and (last['MACD'] < last['MACD_signal']):
-            return "Продати", df
-        else:
-            return None, df
-    except Exception as e:
-        logger.error(f"Помилка при отриманні сигналу для {ticker}: {e}")
-        return None, None
-
-# Функція створення графіку і повернення у байтах
-def plot_chart(df, ticker, signal):
-    try:
-        # Додатково можна стилізувати
-        apds = [mpf.make_addplot(df['EMA9'], color='blue'),
-                mpf.make_addplot(df['RSI'], panel=1, color='orange')]
-        fig, axlist = mpf.plot(df, type='candle', addplot=apds,
-                               title=f"{ticker} - Сигнал: {signal}",
-                               style='yahoo', returnfig=True,
-                               figsize=(8, 6))
-        buf = BytesIO()
-        fig.savefig(buf, format='png')
-        plt.close(fig)
-        buf.seek(0)
-        return buf
-    except Exception as e:
-        logger.error(f"Помилка при побудові графіку: {e}")
-        return None
-
-async def main():
-    bot = Bot(token=TOKEN)
-
+# --- Основна логіка ---
+async def send_signal(bot: Bot):
     while True:
-        found_signal = False
         for pair in PAIRS:
-            if not is_pair_active(pair):
-                continue
+            try:
+                df = yf.download(pair, interval="5m", period="1d", progress=False)
+                if df.empty: continue
+                signal = get_signal(df)
+                if signal:
+                    now = datetime.now(TIMEZONE)
+                    exit_time = (now + timedelta(minutes=5)).strftime("%H:%M")
+                    chart = generate_chart(df, df.index[-1], signal)
+                    text = f"📈 <b>Пара:</b> {pair.replace('=X','')}
+💡 <b>Сигнал:</b> <u>{signal}</u>
+⏱ <b>До:</b> {exit_time}"
+                    await bot.send_photo(chat_id=CHAT_ID, photo=chart, caption=text, parse_mode="HTML")
+            except Exception as e:
+                print(f"❌ Error: {e}")
+        await asyncio.sleep(10)
 
-            signal, df = get_signal(pair)
-            if signal:
-                chart = plot_chart(df, pair, signal)
-                now = datetime.datetime.now(pytz.timezone("Europe/Kiev"))
-                text = f"📈 Пара: {pair}\n⏰ Час: {now.strftime('%Y-%m-%d %H:%M:%S')}\n📊 Сигнал: {signal}"
-                try:
-                    if chart:
-                        await bot.send_photo(chat_id=CHAT_ID, photo=chart, caption=text)
-                    else:
-                        await bot.send_message(chat_id=CHAT_ID, text=text)
-                except TelegramError as e:
-                    logger.error(f"Помилка надсилання повідомлення: {e}")
-                found_signal = True
-                break  # Надіслали сигнал — можна чекати наступного циклу
-
-        if not found_signal:
-            logger.info("Не знайдено сигналів. Чекаємо 10 секунд...")
-            await asyncio.sleep(10)
-        else:
-            logger.info("Сигнал надіслано. Чекаємо 5 хвилин...")
-            await asyncio.sleep(300)  # Чекаємо 5 хвилин перед наступним пошуком
-
+# --- Старт ---
 if __name__ == "__main__":
-    asyncio.run(main())
+    logging.basicConfig(level=logging.INFO)
+    bot = Bot(token=TOKEN)
+    asyncio.run(send_signal(bot))
