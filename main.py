@@ -81,7 +81,7 @@ BB: Верхня={round(df['BB_upper'].iloc[-1], 5)} / Нижня={round(df['BB_
                     await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode="Markdown")
                     return
             except Exception as e:
-                logging.error(f"Помилка для {pair}: {e}")
+                logging.error(f"Помилка для {pair}: {e}") 
                 continue
         
         # Якщо по всіх парах сигналів немає — почекаємо 10 секунд і спробуємо ще раз
