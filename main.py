@@ -17,7 +17,7 @@ bot = Bot(token=TOKEN)
 
 logging.basicConfig(level=logging.INFO)
 
-# Повний список валютних пар Pocket Option
+# Валютні пари Pocket Option
 PAIRS = [
     "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "NZDUSD=X", "USDCAD=X", "USDCHF=X",
     "EURGBP=X", "EURJPY=X", "GBPJPY=X", "AUDJPY=X", "CHFJPY=X", "NZDJPY=X", "CADJPY=X",
@@ -30,8 +30,8 @@ INTERVAL = "5m"
 def fetch_data(symbol):
     try:
         data = yf.download(tickers=symbol, period="1d", interval=INTERVAL)
-        if data.empty or len(data) < 20:
-            logging.warning(f"Пара {symbol} неактивна або не існує. Пропускаю.")
+        if data.empty or len(data) < 21:
+            logging.warning(f"Пара {symbol} неактивна або замало даних. Пропускаю.")
             return None
         return data
     except Exception as e:
@@ -39,9 +39,10 @@ def fetch_data(symbol):
         return None
 
 def analyze(data):
-    close = data["Close"].squeeze()
-    high = data["High"].squeeze()
-    low = data["Low"].squeeze()
+    # Видаляємо останню (незакриту) свічку
+    close = data["Close"].iloc[:-1].squeeze()
+    high = data["High"].iloc[:-1].squeeze()
+    low = data["Low"].iloc[:-1].squeeze()
 
     ema = EMAIndicator(close, window=14).ema_indicator()
     rsi = RSIIndicator(close, window=14).rsi()
@@ -84,8 +85,8 @@ def analyze(data):
 def format_time():
     kyiv = pytz.timezone("Europe/Kyiv")
     now = datetime.now(kyiv)
-    entry_minute = (now.minute // 5 + 1) * 5
-    entry_time = now.replace(minute=entry_minute % 60, second=0)
+    next_minute = (now.minute // 5 + 1) * 5
+    entry_time = now.replace(minute=next_minute % 60, second=0)
     return entry_time.strftime('%H:%M')
 
 async def send_signal(symbol, signal, latest):
@@ -102,7 +103,15 @@ async def send_signal(symbol, signal, latest):
     )
     await bot.send_message(chat_id=CHAT_ID, text=message)
 
+def wait_for_next_candle():
+    now = datetime.now()
+    seconds = now.minute * 60 + now.second
+    wait = 300 - (seconds % 300)
+    logging.info(f"Очікую {wait} секунд до наступної свічки...")
+    time.sleep(wait)
+
 def main():
+    wait_for_next_candle()  # Синхронізує запуск
     while True:
         for symbol in PAIRS:
             data = fetch_data(symbol)
@@ -110,7 +119,7 @@ def main():
                 signal, latest = analyze(data)
                 if signal:
                     asyncio.run(send_signal(symbol, signal, latest))
-        time.sleep(60)
+        wait_for_next_candle()
 
 if __name__ == "__main__":
     main()
