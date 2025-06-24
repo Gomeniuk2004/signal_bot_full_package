@@ -9,7 +9,7 @@ from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
 
-# 🔐 Вшиті значення
+# Вшиті значення токена і чат ID
 TOKEN = "8091244631:AAHZRqn2bY3Ow2zH2WNk0J92mar6D0MgfLw"
 CHAT_ID = "992940966"
 bot = Bot(token=TOKEN)
@@ -81,17 +81,17 @@ def format_time():
 
 def send_signal(symbol, signal, latest):
     name = symbol.replace("=X", "").replace("-", "")
-    message = f"""📡 <b>Сигнал для {name}</b>
-Дія: <b>{signal}</b>
-Ціна: {latest['price']:.5f}
-EMA: {latest['ema']:.5f}
-RSI: {latest['rsi']:.2f}
-MACD: {latest['macd']:.5f}
-Stoch: {latest['stoch']:.2f}
-Час входу (Київ): <b>{format_time()}</b>
-#Signal24
-"""
-    bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML")
+    message = (
+        f"Пара: {name}\n"
+        f"Сигнал: {signal}\n"
+        f"Ціна: {latest['price']:.5f}\n"
+        f"EMA: {latest['ema']:.5f}\n"
+        f"RSI: {latest['rsi']:.2f}\n"
+        f"MACD: {latest['macd']:.5f}\n"
+        f"Stoch: {latest['stoch']:.2f}\n"
+        f"Час входу (Київ): {format_time()}"
+    )
+    bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=None)
 
 def main():
     while True:
