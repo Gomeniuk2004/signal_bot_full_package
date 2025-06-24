@@ -1,8 +1,10 @@
-python-telegram-bot==20.3
-yfinance
 pandas
-ta
+numpy
 matplotlib
 mplfinance
+yfinance
+ta
+python-telegram-bot==20.3
 flask
+httpx
 pytz
