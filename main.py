@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import logging
 import pytz
@@ -28,8 +29,7 @@ bot = Bot(token=TOKEN)
 # === Обробка /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Шукаю найкращий сигнал...\n"
-        "Наразі немає чітких сигналів на 5 хвилин."
+        "Шукаю найкращий сигнал...\nНаразі немає чітких сигналів на 5 хвилин."
     )
 
 # === Отримання часу входу ===
@@ -40,14 +40,13 @@ def get_entry_time():
     entry_time = now.replace(minute=next_minute % 60, second=0)
     return entry_time.strftime('%H:%M')
 
-# === Аналіз однієї валютної пари ===
+# === Аналіз однієї пари ===
 def fetch_and_analyze(symbol):
     try:
         data = yf.download(tickers=symbol, period="1d", interval=INTERVAL)
         if data.empty or len(data) < 21:
             return None
 
-        # Виключаємо останню незакриту свічку
         close = data["Close"].iloc[:-1].squeeze()
         high = data["High"].iloc[:-1].squeeze()
         low = data["Low"].iloc[:-1].squeeze()
@@ -94,7 +93,7 @@ def fetch_and_analyze(symbol):
         logging.warning(f"Помилка {symbol}: {e}")
         return None
 
-# === Відправка сигналу в Telegram ===
+# === Відправка сигналу ===
 async def send_signal(symbol, signal, latest):
     name = symbol.replace("=X", "").replace("-", "")
     msg = (
@@ -109,7 +108,7 @@ async def send_signal(symbol, signal, latest):
     )
     await bot.send_message(chat_id=CHAT_ID, text=msg)
 
-# === Головний цикл бота ===
+# === Основний цикл пошуку сигналів ===
 async def signal_loop():
     while True:
         for symbol in PAIRS:
@@ -118,21 +117,23 @@ async def signal_loop():
                 signal, latest = result
                 if signal:
                     await send_signal(symbol, signal, latest)
-        # Очікуємо до наступної п’ятихвилинки
         now = datetime.now()
         seconds = now.minute * 60 + now.second
         wait = 300 - (seconds % 300)
         await asyncio.sleep(wait)
 
-# === Запуск Telegram-бота та сигналів ===
+# === Запуск Telegram-бота ===
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-
-    # Паралельний запуск сигналів і Telegram
-    loop_task = asyncio.create_task(signal_loop())
+    asyncio.create_task(signal_loop())
     await app.run_polling()
-    await loop_task
 
+# === Гарантований запуск навіть при активному event loop ===
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        loop.create_task(main())
+        loop.run_forever()
