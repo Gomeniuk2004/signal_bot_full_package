@@ -1,116 +1,104 @@
-import asyncio
-import datetime
-import pytz
 import logging
 import os
-import io
-import matplotlib.pyplot as plt
-import mplfinance as mpf
-import pandas as pd
+import pytz
+import asyncio
+import datetime
 import yfinance as yf
-from telegram import Update, InputMediaPhoto
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from ta.trend import EMAIndicator, MACD
+import pandas as pd
+from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
+from ta.trend import MACD
+from telegram import Bot
+from telegram.ext import ApplicationBuilder, CommandHandler
 
+# Токен і чат
 TOKEN = "8091244631:AAHZRqn2bY3Ow2zH2WNk0J92mar6D0MgfLw"
 CHAT_ID = 992940966
-PAIRS = ["EURUSD=X", "GBPUSD=X", "USDCHF=X", "USDJPY=X", "AUDUSD=X"]
-INTERVAL = "5m"
-TIMEZONE = "Europe/Kyiv"
 
+# Логування
 logging.basicConfig(level=logging.INFO)
 
-def analyze_signals(df):
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
+# Валютні пари для аналізу
+PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "NZDUSD=X", "USDCAD=X", "USDCHF=X", "EURGBP=X"]
 
-    ema = EMAIndicator(close, window=9).ema_indicator().iloc[-1]
-    rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
-    macd = MACD(close).macd_diff().iloc[-1]
-    stochastic = StochasticOscillator(close, high, low).stoch_signal().iloc[-1]
-    bb_upper = BollingerBands(close).bollinger_hband().iloc[-1]
-    bb_lower = BollingerBands(close).bollinger_lband().iloc[-1]
+# Таймфрейм
+INTERVAL = "5m"
 
-    signal = None
-    if rsi < 35 and macd > 0 and stochastic < 40:
-        signal = "Купити"
-    elif rsi > 65 and macd < 0 and stochastic > 60:
-        signal = "Продати"
-    return signal, ema, rsi, macd, stochastic, bb_upper, bb_lower
+# Скільки свічок качати
+LIMIT = 100
 
-def plot_candlestick(df, pair):
-    df.index.name = 'Date'
-    df_plot = df[['Open', 'High', 'Low', 'Close']]
-    buffer = io.BytesIO()
-    mpf.plot(df_plot, type='candle', style='charles', title=pair, ylabel='Ціна',
-             volume=False, savefig=dict(fname=buffer, dpi=100, bbox_inches='tight'))
-    buffer.seek(0)
-    return buffer
+# Київський час
+kyiv_tz = pytz.timezone("Europe/Kyiv")
 
-def get_kyiv_time():
-    return datetime.datetime.now(pytz.timezone(TIMEZONE))
+def get_signal(df):
+    df = df.copy()
+    df["EMA"] = EMAIndicator(df["Close"], window=9).ema_indicator()
+    df["RSI"] = RSIIndicator(df["Close"], window=14).rsi()
+    df["MACD"] = MACD(df["Close"]).macd_diff()
+    stoch = StochasticOscillator(df["High"], df["Low"], df["Close"])
+    df["Stoch_K"] = stoch.stoch()
+    df["Stoch_D"] = stoch.stoch_signal()
+    bb = BollingerBands(df["Close"])
+    df["BB_upper"] = bb.bollinger_hband()
+    df["BB_lower"] = bb.bollinger_lband()
+    last = df.iloc[-1]
 
-async def send_signal(app):
+    if last["RSI"] < 35 and last["MACD"] > 0 and last["Close"] > last["EMA"]:
+        return "Купити"
+    elif last["RSI"] > 65 and last["MACD"] < 0 and last["Close"] < last["EMA"]:
+        return "Продати"
+    else:
+        return None
+
+async def start(update, context):
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="🔍 Шукаю найкращий сигнал...")
+
     for pair in PAIRS:
         try:
-            df = yf.download(pair, interval=INTERVAL, period="90m", progress=False)
-            if df.empty:
+            df = yf.download(pair, interval=INTERVAL, period="1d", progress=False)
+
+            if len(df) < LIMIT:
                 continue
 
-            signal, ema, rsi, macd, stochastic, bb_upper, bb_lower = analyze_signals(df)
+            df = df.tail(LIMIT)
+
+            signal = get_signal(df)
             if signal:
-                now = get_kyiv_time()
-                entry_until = (now + datetime.timedelta(minutes=5)).strftime("%H:%M")
-                buffer = plot_candlestick(df.tail(30), pair)
+                now_kyiv = datetime.datetime.now(kyiv_tz)
+                next_time = now_kyiv + datetime.timedelta(minutes=5)
+                minute_target = next_time.strftime("%H:%M")
 
-                msg = f"""
-📊 Валютна пара: {pair.replace('=X', '')}
+                name = pair.replace("=X", "")
+                message = f"""
+📈 Валютна пара: {name}
 ⏱️ Таймфрейм: 5 хв
-📈 Сигнал: {signal}
-🕐 Угоду слід відкрити ДО: *{entry_until}* (за Києвом)
+💡 Сигнал: *{signal}*
 
-📋 Пояснення:
-RSI: {rsi:.2f}
-EMA(9): {ema:.5f}
-MACD: {macd:.5f}
-Stochastic: {stochastic:.2f}
-Bollinger Bands: верхня={bb_upper:.5f}, нижня={bb_lower:.5f}
-Ціна: {df['Close'].iloc[-1]:.5f}
-                """.strip()
+🕒 Вхід до: *{minute_target}* (Київ)
 
-                await app.bot.send_photo(
-                    chat_id=CHAT_ID,
-                    photo=buffer,
-                    caption=msg,
-                    parse_mode='Markdown'
-                )
+📊 Індикатори:
+RSI: {round(df['RSI'].iloc[-1], 2)}
+EMA: {round(df['EMA'].iloc[-1], 5)}
+MACD: {round(df['MACD'].iloc[-1], 5)}
+Stoch %K: {round(df['Stoch_K'].iloc[-1], 2)} / %D: {round(df['Stoch_D'].iloc[-1], 2)}
+BB: Верхня={round(df['BB_upper'].iloc[-1], 5)} / Нижня={round(df['BB_lower'].iloc[-1], 5)}
+Ціна: {round(df['Close'].iloc[-1], 5)}
+""".strip()
+
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode="Markdown")
                 return
+
         except Exception as e:
-            logging.error(f"Помилка з парою {pair}: {e}")
+            logging.error(f"Помилка для {pair}: {e}")
+            continue
 
-    await app.bot.send_message(chat_id=CHAT_ID, text="❌ Наразі немає чітких сигналів на 5 хвилин.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Наразі немає чітких сигналів на 5 хвилин.")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Бот активний. Шукаю сигнал...")
-    await send_signal(context.application)
-
-if __name__ == "__main__":
+def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.run_polling()
 
-    async def periodic():
-        while True:
-            await send_signal(app)
-            await asyncio.sleep(300)
-
-    async def main():
-        await app.initialize()
-        await app.start()
-        asyncio.create_task(periodic())
-        await app.updater.start_polling()
-        await app.updater.idle()
-
-    asyncio.run(main())
+if __name__ == "__main__":
+    main()
