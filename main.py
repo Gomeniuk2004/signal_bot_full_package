@@ -3,15 +3,13 @@ import pytz
 import logging
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from datetime import datetime
 from telegram import Bot
-from ta.trend import EMAIndicator
+from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
-from ta.trend import MACD
 
-# Вшиті значення токена і чат ID
+# 🔐 Вшиті значення
 TOKEN = "8091244631:AAHZRqn2bY3Ow2zH2WNk0J92mar6D0MgfLw"
 CHAT_ID = "992940966"
 bot = Bot(token=TOKEN)
@@ -32,11 +30,14 @@ def fetch_data(symbol):
         return None
 
 def analyze(data):
-    close = data["Close"]
+    close = data["Close"].squeeze()
+    high = data["High"].squeeze()
+    low = data["Low"].squeeze()
+
     ema = EMAIndicator(close, window=14).ema_indicator()
     rsi = RSIIndicator(close, window=14).rsi()
     macd = MACD(close).macd_diff()
-    stoch = StochasticOscillator(data["High"], data["Low"], close).stoch()
+    stoch = StochasticOscillator(high, low, close).stoch()
     bb = BollingerBands(close)
     bb_upper = bb.bollinger_hband()
     bb_lower = bb.bollinger_lband()
