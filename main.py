@@ -1,6 +1,7 @@
 import time
 import pytz
 import logging
+import asyncio
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
@@ -87,7 +88,7 @@ def format_time():
     entry_time = now.replace(minute=entry_minute % 60, second=0)
     return entry_time.strftime('%H:%M')
 
-def send_signal(symbol, signal, latest):
+async def send_signal(symbol, signal, latest):
     name = symbol.replace("=X", "").replace("-", "")
     message = (
         f"Пара: {name}\n"
@@ -99,7 +100,7 @@ def send_signal(symbol, signal, latest):
         f"Stoch: {latest['stoch']:.2f}\n"
         f"Час входу (Київ): {format_time()}"
     )
-    bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=None)
+    await bot.send_message(chat_id=CHAT_ID, text=message)
 
 def main():
     while True:
@@ -108,7 +109,7 @@ def main():
             if data is not None:
                 signal, latest = analyze(data)
                 if signal:
-                    send_signal(symbol, signal, latest)
+                    asyncio.run(send_signal(symbol, signal, latest))
         time.sleep(60)
 
 if __name__ == "__main__":
